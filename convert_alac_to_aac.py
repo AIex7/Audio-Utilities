@@ -248,6 +248,7 @@ def convert_alac_to_aac(
         bitrate: Bitrate in bps (e.g. 300000 for 300 kbps).
         force: If True, convert even if codec doesn't explicitly detect as ALAC.
         dry_run: If True, only simulate conversion.
+        copy_metadata: If True, copy tags and artwork using mutagen.
 
     Returns:
         (success: bool, message: str)
@@ -265,7 +266,7 @@ def convert_alac_to_aac(
             return False, f"Skipped (format is '{codec}', not ALAC; use --force to override)"
 
     if dry_run:
-        return True, "Dry-run: Would convert to AAC 300 kbps VBR"
+        return True, f"Dry-run: Would convert to AAC {bitrate // 1000} kbps VBR"
 
     parent_dir = file_path.parent
     orig_size = file_path.stat().st_size
@@ -315,13 +316,9 @@ def convert_alac_to_aac(
             err_msg = stderr.strip() or stdout.strip() or f"exit code {_current_process.returncode}"
             return False, f"afconvert failed: {err_msg}"
 
-        # Verify output file
+        # Verify output file exists and is non-empty
         if not temp_out.is_file() or temp_out.stat().st_size == 0:
             return False, "Conversion failed: output temp file is missing or empty"
-
-        new_size = temp_out.stat().st_size
-        saved_bytes = orig_size - new_size
-        saved_pct = (saved_bytes / orig_size) * 100 if orig_size > 0 else 0
 
         # Copy original tags and artwork into the temporary file before replacement.
         # If tag copying fails, abort and delete the temp file so the original ALAC file is safe.
@@ -330,11 +327,19 @@ def convert_alac_to_aac(
             if not tag_ok:
                 return False, f"Tag copy failed ({tag_err}); aborted to preserve original file"
 
+        # Verify that the final converted file (including tags & artwork) is smaller than original
+        final_size = temp_out.stat().st_size
+        if final_size >= orig_size:
+            return False, f"Output ({format_size(final_size)}) is not smaller than original ({format_size(orig_size)}); aborted to preserve original"
+
+        saved_bytes = orig_size - final_size
+        saved_pct = (saved_bytes / orig_size) * 100 if orig_size > 0 else 0
+
         # Atomic replacement: replaces original file with the newly encoded file.
         # Original file is intact until this exact moment.
         os.replace(temp_out, file_path)
 
-        return True, f"{format_size(orig_size)} -> {format_size(new_size)} ({saved_pct:.1f}% reduction)"
+        return True, f"{format_size(orig_size)} -> {format_size(final_size)} ({saved_pct:.1f}% reduction)"
 
     except KeyboardInterrupt:
         raise
