@@ -161,6 +161,9 @@ def compute_audio_packets_hash(file_path: Path) -> Optional[str]:
                             hasher.update(chunk)
                             remaining -= len(chunk)
                 else:
+                    # Non-mdat atom extends to EOF (size == 0) or is malformed (< 8)
+                    if data_len < 0:
+                        break
                     if data_len > 0:
                         f.seek(data_len, 1)
 
