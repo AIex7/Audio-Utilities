@@ -2,17 +2,16 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #     "mutagen>=1.47.0",
-#     "send2trash>=1.8.0",
 # ]
 # ///
 
 import os
+import subprocess
 import sys
 from typing import Optional, Tuple
 from mutagen.mp3 import MP3
 from mutagen.id3 import APIC
 from mutagen.mp4 import MP4, MP4Cover
-from send2trash import send2trash
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a"}
@@ -86,7 +85,7 @@ def embed_artwork(audio_path: str, image_path: str) -> None:
             audio.add_tags()
         image_fmt = MP4Cover.FORMAT_PNG if img_ext == ".png" else MP4Cover.FORMAT_JPEG
         # Setting 'covr' directly replaces any existing artwork
-        audio["covr"] = [MP4Cover(img_data, image_format=image_fmt)]
+        audio["covr"] = [MP4Cover(img_data, imageformat=image_fmt)]
         audio.save()
 
     else:
@@ -165,7 +164,7 @@ def process_directories(root_dir: str) -> None:
             try:
                 embed_artwork(audio_path, image_path)
                 print(f"[TRASH] Trashing {image_path}...")
-                send2trash(image_path)
+                subprocess.run(["trash", image_path], check=True)
             except Exception as e:
                 print(f"[ERROR] Failed processing {audio_path}: {e}", file=sys.stderr)
         else:
