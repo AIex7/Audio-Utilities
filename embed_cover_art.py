@@ -3,14 +3,16 @@
 # dependencies = [
 #     "mutagen",
 #     "pillow",
+#     "pillow-jxl-plugin",
 # ]
 # ///
 """
-Recursively scans for directories containing cover.jpg or cover.png.
+Recursively scans for directories containing cover.jpg, cover.png, or cover.jxl.
 For each directory:
 - Checks the width of the cover image.
-- If width <= 600: embeds the original image directly.
-- If width > 600: creates a 600x600 resized file in /tmp and embeds that.
+- If width <= 600 and JPEG/PNG: embeds the original image directly.
+- If width <= 600 and JXL: converts to JPEG at original size in /tmp and embeds that.
+- If width > 600: resizes to 600x600 in /tmp (as JPEG for JPG/JXL, PNG for PNG) and embeds that.
 - Embeds the artwork into every .mp3 and .m4a file in that directory.
 - Ensures the final audio file contains ONLY that artwork (removes any previous artwork).
 - Preserves all other audio metadata tags untouched.
@@ -20,7 +22,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -30,12 +35,37 @@ from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
 from PIL import Image
 
+try:
+    import pillow_jxl  # noqa: F401
+except ImportError:
+    pass
+
+
+def open_image(path: Path) -> Image.Image:
+    """Open an image using PIL, with djxl CLI fallback for JPEG XL if needed."""
+    try:
+        img = Image.open(path)
+        img.load()
+        return img
+    except Exception:
+        if path.suffix.lower() == ".jxl" and shutil.which("djxl"):
+            res = subprocess.run(
+                ["djxl", str(path), "-", "--output_format", "png"],
+                capture_output=True,
+                check=True,
+            )
+            img = Image.open(io.BytesIO(res.stdout))
+            img.load()
+            return img
+        raise
+
 
 def get_cover_file(dir_path: Path, filenames: list[str]) -> Path | None:
-    """Find cover.jpg or cover.png in the directory (case-insensitive)."""
-    for f in filenames:
-        if f.lower() in ("cover.jpg", "cover.jpeg", "cover.png"):
-            return dir_path / f
+    """Find cover.jpg, cover.png, or cover.jxl in the directory (case-insensitive)."""
+    file_map = {f.lower(): f for f in filenames}
+    for candidate in ("cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"):
+        if candidate in file_map:
+            return dir_path / file_map[candidate]
     return None
 
 
@@ -45,31 +75,33 @@ def prepare_cover_data(cover_path: Path) -> tuple[bytes, str, str]:
     Returns:
         (image_bytes, mime_type, description_string)
     """
-    with Image.open(cover_path) as img:
+    is_jxl_file = cover_path.suffix.lower() == ".jxl"
+
+    with open_image(cover_path) as img:
         width, height = img.size
-        img_format = (img.format or "").upper()
+        img_format = "JXL" if is_jxl_file else (img.format or "").upper()
 
     is_png = img_format == "PNG"
     is_jpeg = img_format in ("JPEG", "JPG")
 
-    # If width <= 600 and already standard JPEG/PNG, embed directly
-    if width <= 600 and (is_png or is_jpeg):
+    # If width <= 600 and already standard JPEG/PNG, embed directly (JXL cannot be embedded directly)
+    if width <= 600 and (is_png or is_jpeg) and not is_jxl_file:
         mime = "image/png" if is_png else "image/jpeg"
         desc = f"Direct original ({width}x{height}, {img_format})"
         return cover_path.read_bytes(), mime, desc
 
-    # Either width > 600 or non-standard format (e.g. WebP) converted to JPEG/PNG in /tmp
-    ext = ".png" if is_png else ".jpg"
+    # Either width > 600 or non-standard format (e.g. JXL, WebP) converted to JPEG/PNG in /tmp
+    ext = ".png" if is_png and not is_jxl_file else ".jpg"
     file_hash = hashlib.md5(str(cover_path.resolve()).encode()).hexdigest()[:10]
     tmp_path = Path("/tmp") / f"resized_600x600_{file_hash}{ext}"
 
-    with Image.open(cover_path) as img:
+    with open_image(cover_path) as img:
         if width > 600:
             # Resize preserving aspect ratio (neither dimension exceeds 600)
             img.thumbnail((600, 600), Image.Resampling.LANCZOS)
         new_w, new_h = img.size
 
-        if is_png:
+        if is_png and not is_jxl_file:
             img.save(tmp_path, format="PNG", optimize=True)
             mime = "image/png"
         else:
