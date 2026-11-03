@@ -3,7 +3,6 @@
 # dependencies = [
 #     "mutagen",
 #     "pillow",
-#     "pillow-jxl-plugin",
 # ]
 # ///
 """
@@ -35,29 +34,23 @@ from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
 from PIL import Image
 
-try:
-    import pillow_jxl  # noqa: F401
-except ImportError:
-    pass
-
-
 def open_image(path: Path) -> Image.Image:
-    """Open an image using PIL, with djxl CLI fallback for JPEG XL if needed."""
-    try:
-        img = Image.open(path)
+    """Open an image using PIL, using djxl CLI for JPEG XL."""
+    if path.suffix.lower() == ".jxl":
+        if not shutil.which("djxl"):
+            raise RuntimeError("djxl CLI is required to decode .jxl images but was not found in PATH")
+        res = subprocess.run(
+            ["djxl", str(path), "-", "--output_format", "png"],
+            capture_output=True,
+            check=True,
+        )
+        img = Image.open(io.BytesIO(res.stdout))
         img.load()
         return img
-    except Exception:
-        if path.suffix.lower() == ".jxl" and shutil.which("djxl"):
-            res = subprocess.run(
-                ["djxl", str(path), "-", "--output_format", "png"],
-                capture_output=True,
-                check=True,
-            )
-            img = Image.open(io.BytesIO(res.stdout))
-            img.load()
-            return img
-        raise
+
+    img = Image.open(path)
+    img.load()
+    return img
 
 
 def get_cover_file(dir_path: Path, filenames: list[str]) -> Path | None:
