@@ -11,7 +11,7 @@ import tempfile
 
 def get_audio_hash(audio_file: Path, temp_dir: Path) -> str:
     """Compute the SHA-1 hash of the audio data in an audio file using macOS built-in tools."""
-    caf_path = temp_dir / f"verify_{audio_file.stem}_{audio_file.suffix.lstrip('.')}.caf"
+    caf_path = temp_dir / f"verify_{audio_file.suffix.lstrip('.')}.caf"
     convert_result = subprocess.run(
         ["afconvert", "-f", "caff", "-d", "LEI32", str(audio_file), str(caf_path)],
         capture_output=True,

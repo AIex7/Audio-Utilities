@@ -197,6 +197,49 @@ def embed_art_in_m4a(file_path: Path, image_bytes: bytes, mime_type: str) -> boo
         return False
 
 
+def has_identical_single_cover(file_path: Path, image_bytes: bytes) -> bool:
+    """Return True if file_path has exactly one embedded image matching image_bytes in size and SHA-256 hash."""
+    ext = file_path.suffix.lower()
+    target_size = len(image_bytes)
+    target_hash = hashlib.sha256(image_bytes).digest()
+
+    try:
+        if ext == ".mp3":
+            try:
+                audio = MP3(file_path)
+            except Exception:
+                audio = mutagen.File(file_path)
+            if audio is None or audio.tags is None:
+                return False
+            apic_frames = [
+                v for k, v in audio.tags.items()
+                if k.startswith("APIC") or isinstance(v, APIC)
+            ]
+            if len(apic_frames) != 1:
+                return False
+            existing_data = apic_frames[0].data
+        elif ext in (".m4a", ".mp4", ".m4b", ".m4p"):
+            try:
+                audio = MP4(file_path)
+            except Exception:
+                audio = mutagen.File(file_path)
+            if audio is None or audio.tags is None:
+                return False
+            covers = audio.tags.get("covr")
+            if not covers or len(covers) != 1:
+                return False
+            existing_data = bytes(covers[0])
+        else:
+            return False
+
+        return (
+            len(existing_data) == target_size
+            and hashlib.sha256(existing_data).digest() == target_hash
+        )
+    except Exception:
+        return False
+
+
 def embed_artwork_in_file(file_path: Path, image_bytes: bytes, mime_type: str) -> bool:
     ext = file_path.suffix.lower()
     if ext == ".mp3":
@@ -218,6 +261,7 @@ def process_directories(root_dir: str, dry_run: bool = False) -> None:
 
     total_directories = 0
     updated_files_count = 0
+    skipped_files_count = 0
     failed_files_count = 0
     target_extensions = {".mp3", ".m4a"}
 
@@ -252,6 +296,12 @@ def process_directories(root_dir: str, dry_run: bool = False) -> None:
         print(f"    Files to embed: {len(audio_files)}")
 
         for af in audio_files:
+            if has_identical_single_cover(af, image_bytes):
+                prefix = "[DRY-RUN WOULD SKIP]" if dry_run else "[SKIPPED]"
+                print(f"      {prefix} {af.name} (identical single cover already embedded)")
+                skipped_files_count += 1
+                continue
+
             if dry_run:
                 print(f"      [DRY-RUN WOULD EMBED] {af.name}")
                 updated_files_count += 1
@@ -269,6 +319,7 @@ def process_directories(root_dir: str, dry_run: bool = False) -> None:
     print("SUMMARY")
     print(f"  Directories processed : {total_directories}")
     print(f"  Files embedded        : {updated_files_count}")
+    print(f"  Files skipped         : {skipped_files_count}")
     if failed_files_count > 0:
         print(f"  Files failed          : {failed_files_count}")
     print("=" * 80)

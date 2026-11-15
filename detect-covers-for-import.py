@@ -8,13 +8,15 @@
 import os
 import subprocess
 import sys
+import tempfile
 from typing import Optional, Tuple
 from mutagen.mp3 import MP3
 from mutagen.id3 import APIC
 from mutagen.mp4 import MP4, MP4Cover
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".jxl"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a"}
+MAX_EMBED_IMAGE_BYTES = 500 * 1024
 
 
 def extract_artwork(audio_path: str) -> Optional[Tuple[bytes, str]]:
@@ -92,12 +94,44 @@ def embed_artwork(audio_path: str, image_path: str) -> None:
         raise ValueError(f"Unsupported audio format: {audio_ext}")
 
 
+def convert_to_normal_jpg(image_path: str) -> str:
+    """Convert an image to a normal-quality JPEG in a temporary file and return its path."""
+    fd, temp_jpg_path = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        subprocess.run(
+            [
+                "sips",
+                "-s",
+                "format",
+                "jpeg",
+                "-s",
+                "formatOptions",
+                "normal",
+                image_path,
+                "--out",
+                temp_jpg_path,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+    except Exception:
+        if os.path.exists(temp_jpg_path):
+            os.remove(temp_jpg_path)
+        raise
+    return temp_jpg_path
+
+
 def rename_image_to_cover(image_path: str) -> str:
-    """Rename single image file to lowercase cover.jpg or cover.png."""
+    """Rename single image file to lowercase cover.jpg, cover.png, or cover.jxl."""
     dir_path, filename = os.path.split(image_path)
     img_ext = os.path.splitext(filename)[1].lower()
 
-    target_name = "cover.png" if img_ext == ".png" else "cover.jpg"
+    ext_to_target = {
+        ".png": "cover.png",
+        ".jxl": "cover.jxl",
+    }
+    target_name = ext_to_target.get(img_ext, "cover.jpg")
     target_path = os.path.join(dir_path, target_name)
 
     # If the file is already named exactly target_name, no-op
@@ -133,9 +167,9 @@ def process_directories(root_dir: str) -> None:
             elif ext in AUDIO_EXTENSIONS:
                 audio_files.append(file_name)
 
-        # Condition 1: If there is no image in the directory, scan audio files
-        # and extract the first embedded image found to cover.jpg or cover.png
-        if len(image_files) == 0 and len(audio_files) > 0:
+        # Condition 1: If there is no image in the directory and multiple audio files,
+        # scan audio files and extract the first embedded image found to cover.jpg or cover.png
+        if len(image_files) == 0 and len(audio_files) > 1:
             for audio_name in sorted(audio_files):
                 audio_path = os.path.join(current_dir, audio_name)
                 extracted = extract_artwork(audio_path)
@@ -159,19 +193,46 @@ def process_directories(root_dir: str) -> None:
         image_path = os.path.join(current_dir, image_files[0])
 
         if len(audio_files) == 1:
+            if os.path.splitext(image_path)[1].lower() == ".jxl":
+                print(f"[SKIP] Cannot embed .jxl directly into audio file: {image_path}")
+                continue
             audio_path = os.path.join(current_dir, audio_files[0])
-            print(f"[EMBED] Embedding {image_path} into {audio_path}...")
+            embed_path = image_path
+            converted_path = None
             try:
-                embed_artwork(audio_path, image_path)
+                original_size = os.path.getsize(image_path)
+                if original_size > MAX_EMBED_IMAGE_BYTES:
+                    print(f"[COMPRESS] {image_path} > 500 KiB; converting to normal-quality JPG...")
+                    converted_path = convert_to_normal_jpg(image_path)
+                    converted_size = os.path.getsize(converted_path)
+                    if converted_size < original_size:
+                        embed_path = converted_path
+                    else:
+                        print(
+                            f"[COMPRESS] Converted JPG ({converted_size} B) is not smaller than original "
+                            f"({original_size} B); using original."
+                        )
+
+                print(f"[EMBED] Embedding {embed_path} into {audio_path}...")
+                embed_artwork(audio_path, embed_path)
+
+                if converted_path is not None:
+                    print(f"[TRASH] Trashing {converted_path}...")
+                    subprocess.run(["trash", converted_path], check=True)
+                    converted_path = None
+
                 print(f"[TRASH] Trashing {image_path}...")
                 subprocess.run(["trash", image_path], check=True)
             except Exception as e:
+                if converted_path is not None and os.path.exists(converted_path):
+                    os.remove(converted_path)
                 print(f"[ERROR] Failed processing {audio_path}: {e}", file=sys.stderr)
         else:
-            # More than one audio file: rename image to cover.jpg or cover.png
+            # More than one audio file: rename image to cover.jpg, cover.png, or cover.jxl
             try:
                 new_path = rename_image_to_cover(image_path)
-                print(f"[RENAME] {image_path} -> {new_path}")
+                if new_path != image_path:
+                    print(f"[RENAME] {image_path} -> {new_path}")
             except Exception as e:
                 print(f"[ERROR] Failed renaming {image_path}: {e}", file=sys.stderr)
 
