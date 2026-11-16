@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Recursively check kMDItemAudioTrackNumber via mdls per folder and report missing track indices in red."""
+"""Recursively check kMDItemAudioTrackNumber via mdls per folder and report missing or duplicate track indices in red."""
 
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import os
 import subprocess
 import sys
@@ -39,7 +40,7 @@ def get_track_number(audio_path: Path) -> int | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check for missing kMDItemAudioTrackNumber indices in each folder of .mp3/.m4a files."
+        description="Check for missing or duplicate kMDItemAudioTrackNumber indices in each folder of .mp3/.m4a files."
     )
     parser.add_argument(
         "directory",
@@ -66,21 +67,26 @@ def main() -> int:
         if not audio_files:
             continue
 
-        track_numbers: set[int] = set()
+        track_counts: Counter[int] = Counter()
         for audio_path in audio_files:
             track_num = get_track_number(audio_path)
             if track_num is not None:
-                track_numbers.add(track_num)
+                track_counts[track_num] += 1
 
-        if not track_numbers:
+        if not track_counts:
             continue
 
-        max_index = max(track_numbers)
-        missing = [i for i in range(1, max_index + 1) if i not in track_numbers]
+        rel_dir = "." if dir_path == root_dir else str(dir_path.relative_to(root_dir))
+        max_index = max(track_counts)
+        missing = [i for i in range(1, max_index + 1) if i not in track_counts]
+        duplicates = sorted(num for num, count in track_counts.items() if count > 1)
+
         if missing:
-            rel_dir = "." if dir_path == root_dir else str(dir_path.relative_to(root_dir))
             missing_str = ", ".join(str(i) for i in missing)
             print(f"{ANSI_RED}Missing indices [{missing_str}] - {rel_dir}{ANSI_RESET}")
+        if duplicates:
+            dup_str = ", ".join(str(i) for i in duplicates)
+            print(f"{ANSI_RED}Duplicate indices [{dup_str}] - {rel_dir}{ANSI_RESET}")
 
     return 0
 
