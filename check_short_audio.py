@@ -61,7 +61,7 @@ def main() -> int:
 
             duration = get_estimated_duration(file_path)
             if duration is not None and duration <= 60.0:
-                print(f"{ANSI_RED}{file_path.relative_to(root_dir)}{ANSI_RESET}")
+                print(f"{ANSI_RED}\033[1mLess < 1:00\033[22m {file_path.relative_to(root_dir)}{ANSI_RESET}")
 
     return 0
 

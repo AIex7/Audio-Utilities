@@ -47,7 +47,7 @@ def get_sample_rate(audio_path: Path) -> int:
     return int(result.stdout.strip().splitlines()[0])
 
 
-def highest_frequency_hz(audio_path: Path, db_threshold: float = -70.0) -> float:
+def highest_frequency_hz(audio_path: Path, db_threshold: float = -120.0) -> float:
     """Compute the highest frequency (Hz) with spectral energy >= db_threshold."""
     sample_rate = get_sample_rate(audio_path)
     pcm = subprocess.check_output(

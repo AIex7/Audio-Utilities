@@ -12,8 +12,11 @@ Key features:
 - Uses Apple afconvert with highest quality settings:
     -d aac -f m4af -s 2 -b 300000 -q 127 -r 127 --src-complexity bats --soundcheck-generate
 - Copies all MP4/M4A metadata tags and embedded cover artwork using mutagen.
-- Computes and embeds an SHA-256 integrity hash of the raw encoded AAC audio packets.
-- Protects stream-specific metadata: iTunNORM (SoundCheck), iTunSMPB (gapless), and AUDIO_SHA256.
+- Computes and embeds an SHA-1 integrity hash of the raw encoded AAC audio packets (AAC_HASH).
+- Runs afhash on the source ALAC file and embeds the audio hash line in ALAC_HASH.
+- Sets the Encoded By / Encoding Tool tag (©too) to the afconvert command and flags used.
+- Supports gapless album encoding (--gapless-before / --gapless-after) when all .m4a files in a directory share the same album tag.
+- Protects stream-specific metadata: iTunNORM (SoundCheck), iTunSMPB (gapless), ©too, AAC_HASH, and ALAC_HASH.
 - Detects ALAC streams via afinfo so non-ALAC / already AAC files are skipped.
 - Safe temp file handling: encodes into a hidden temp folder on the same directory/mount.
 - Atomic replacement on success: original file is only replaced once encoding succeeds with no errors.
@@ -32,7 +35,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     from mutagen.mp4 import AtomDataType, MP4, MP4FreeForm
@@ -124,10 +127,10 @@ def get_audio_codec(file_path: Path) -> Optional[str]:
 
 def compute_audio_packets_hash(file_path: Path) -> Optional[str]:
     """
-    Compute the SHA-256 hash of the raw audio packets (the mdat atom payload),
+    Compute the SHA-1 hash of the raw audio packets (the mdat atom payload),
     excluding all MP4 container headers and metadata.
     """
-    hasher = hashlib.sha256()
+    hasher = hashlib.sha1()
     found_audio = False
     try:
         with open(file_path, "rb") as f:
@@ -172,14 +175,43 @@ def compute_audio_packets_hash(file_path: Path) -> Optional[str]:
         return None
 
 
-def copy_tags(src_path: Path, dst_path: Path) -> Tuple[bool, Optional[str]]:
+def get_source_afhash(file_path: Path) -> Optional[str]:
+    """
+    Run afhash on the source ALAC file and return the hash line, e.g.:
+    'MD5 Hash of audio data : 3206c181358afc7edccb2e770ac0abc0' or
+    'Hash of audio data : <sha1>'.
+    """
+    try:
+        result = subprocess.run(
+            ["afhash", str(file_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            return None
+        for line in result.stdout.splitlines():
+            if "Hash of audio data" in line:
+                return line.strip()
+        return None
+    except Exception:
+        return None
+
+
+def copy_tags(
+    src_path: Path,
+    dst_path: Path,
+    encoded_by: Optional[str] = None,
+) -> Tuple[bool, Optional[str]]:
     """
     Copy all MP4/M4A metadata tags and embedded cover artwork
     from src_path to dst_path using mutagen, while protecting
-    stream-specific timing, loudness, and audio integrity tags:
+    stream-specific timing, loudness, encoder, and audio integrity tags:
     - iTunNORM (SoundCheck volume normalization)
     - iTunSMPB (Gapless playback priming and remainder padding)
-    - AUDIO_SHA256 (SHA-256 hash of the newly encoded AAC audio packets)
+    - ©too (Encoded By / Encoding Tool and afconvert flags)
+    - AAC_HASH (SHA-1 hash of the newly encoded AAC mdat audio packets)
+    - ALAC_HASH (afhash output of the source ALAC audio data)
 
     Returns:
         (success: bool, error_message: Optional[str])
@@ -192,22 +224,37 @@ def copy_tags(src_path: Path, dst_path: Path) -> Tuple[bool, Optional[str]]:
         if dst.tags is None:
             dst.add_tags()
 
-        # Compute SHA-256 hash of the newly encoded raw AAC audio packets (mdat payload)
+        # Compute SHA-1 hash of the newly encoded raw AAC audio packets (mdat payload)
         audio_hash = compute_audio_packets_hash(dst_path)
+        # Run afhash on the source ALAC file
+        alac_hash = get_source_afhash(src_path)
 
-        # Protected stream-specific tags generated for this specific AAC stream
+        # Protected stream-specific tags
         protected_keys = {
             "----:com.apple.iTunes:iTunNORM",
             "----:com.apple.iTunes:iTunSMPB",
-            "----:com.apple.iTunes:AUDIO_SHA256",
+            "\xa9too",
+            "----:com.apple.iTunes:AAC_HASH",
+            "----:com.apple.iTunes:ALAC_HASH",
         }
         # Snapshot any existing destination values created by afconvert
         preserved_tags = {k: dst.tags[k] for k in protected_keys if k in dst.tags}
 
-        # If audio hash was successfully computed, add it to preserved destination tags as UTF-8
+        # Record afconvert command and flags in the Encoded By / Encoding Tool tag
+        if encoded_by:
+            preserved_tags["\xa9too"] = [encoded_by]
+
+        # Store AAC mdat SHA-1 hash in AAC_HASH as UTF-8
         if audio_hash:
-            preserved_tags["----:com.apple.iTunes:AUDIO_SHA256"] = [
-                MP4FreeForm(audio_hash.encode("utf-8"), AtomDataType.UTF8)
+            aac_hash_str = f"SHA1 Hash of mdat audio packets : {audio_hash}"
+            preserved_tags["----:com.apple.iTunes:AAC_HASH"] = [
+                MP4FreeForm(aac_hash_str.encode("utf-8"), AtomDataType.UTF8)
+            ]
+
+        # Store source ALAC afhash output in ALAC_HASH as UTF-8
+        if alac_hash:
+            preserved_tags["----:com.apple.iTunes:ALAC_HASH"] = [
+                MP4FreeForm(alac_hash.encode("utf-8"), AtomDataType.UTF8)
             ]
 
         # Copy all source tags except the protected ones
@@ -239,6 +286,9 @@ def convert_alac_to_aac(
     force: bool = False,
     dry_run: bool = False,
     copy_metadata: bool = True,
+    gapless_before: Optional[Path] = None,
+    gapless_after: Optional[Path] = None,
+    staged_out: Optional[Path] = None,
 ) -> Tuple[bool, str]:
     """
     Convert a single M4A file from ALAC to AAC VBR.
@@ -249,6 +299,10 @@ def convert_alac_to_aac(
         force: If True, convert even if codec doesn't explicitly detect as ALAC.
         dry_run: If True, only simulate conversion.
         copy_metadata: If True, copy tags and artwork using mutagen.
+        gapless_before: Optional previous track in a gapless album.
+        gapless_after: Optional next track in a gapless album.
+        staged_out: Optional pre-allocated temp output path; when provided,
+            the caller handles atomic os.replace() and temp cleanup.
 
     Returns:
         (success: bool, message: str)
@@ -266,16 +320,21 @@ def convert_alac_to_aac(
             return False, f"Skipped (format is '{codec}', not ALAC; use --force to override)"
 
     if dry_run:
-        return True, f"Dry-run: Would convert to AAC {bitrate // 1000} kbps VBR"
+        gapless_note = " (gapless)" if (gapless_before or gapless_after) else ""
+        return True, f"Dry-run: Would convert to AAC {bitrate // 1000} kbps VBR{gapless_note}"
 
     parent_dir = file_path.parent
     orig_size = file_path.stat().st_size
 
-    # Create a temporary directory inside the same parent directory.
+    # Create a temporary directory inside the same parent directory unless staged_out is provided.
     # This guarantees that os.replace() at the end is an atomic same-filesystem operation.
-    temp_dir = tempfile.mkdtemp(prefix=".afconvert_tmp_", dir=parent_dir)
-    _current_temp_dir = temp_dir
-    temp_out = Path(temp_dir) / file_path.name
+    own_temp_dir: Optional[str] = None
+    if staged_out is not None:
+        temp_out = staged_out
+    else:
+        own_temp_dir = tempfile.mkdtemp(prefix=".afconvert_tmp_", dir=parent_dir)
+        _current_temp_dir = own_temp_dir
+        temp_out = Path(own_temp_dir) / file_path.name
 
     # afconvert options for maximum quality:
     # -d aac              : AAC audio format
@@ -286,7 +345,7 @@ def convert_alac_to_aac(
     # -r 127              : Highest sample rate converter quality (0-127)
     # --src-complexity bats: Highest sample rate converter complexity (bats = best bandlimited sinc)
     # --soundcheck-generate: Calculate Apple SoundCheck volume normalization metadata
-    cmd = [
+    base_cmd = [
         "afconvert",
         "-d", "aac",
         "-f", "m4af",
@@ -296,9 +355,13 @@ def convert_alac_to_aac(
         "-r", "127",
         "--src-complexity", "bats",
         "--soundcheck-generate",
-        str(file_path),
-        str(temp_out),
     ]
+    cmd = list(base_cmd)
+    if gapless_before is not None:
+        cmd.extend(["--gapless-before", str(gapless_before)])
+    if gapless_after is not None:
+        cmd.extend(["--gapless-after", str(gapless_after)])
+    cmd.extend([str(file_path), str(temp_out)])
 
     try:
         _current_process = subprocess.Popen(
@@ -323,7 +386,13 @@ def convert_alac_to_aac(
         # Copy original tags and artwork into the temporary file before replacement.
         # If tag copying fails, abort and delete the temp file so the original ALAC file is safe.
         if copy_metadata:
-            tag_ok, tag_err = copy_tags(file_path, temp_out)
+            encoded_by_parts = list(base_cmd)
+            if gapless_before is not None:
+                encoded_by_parts.append("--gapless-before")
+            if gapless_after is not None:
+                encoded_by_parts.append("--gapless-after")
+            encoded_by = " ".join(encoded_by_parts)
+            tag_ok, tag_err = copy_tags(file_path, temp_out, encoded_by=encoded_by)
             if not tag_ok:
                 return False, f"Tag copy failed ({tag_err}); aborted to preserve original file"
 
@@ -335,9 +404,9 @@ def convert_alac_to_aac(
         saved_bytes = orig_size - final_size
         saved_pct = (saved_bytes / orig_size) * 100 if orig_size > 0 else 0
 
-        # Atomic replacement: replaces original file with the newly encoded file.
-        # Original file is intact until this exact moment.
-        os.replace(temp_out, file_path)
+        # Atomic replacement unless caller staged the directory for gapless batch replacement
+        if staged_out is None:
+            os.replace(temp_out, file_path)
 
         return True, f"{format_size(orig_size)} -> {format_size(final_size)} ({saved_pct:.1f}% reduction)"
 
@@ -347,13 +416,63 @@ def convert_alac_to_aac(
         return False, f"Unexpected error: {exc}"
     finally:
         _current_process = None
-        # Always clean up the temporary directory
-        if temp_dir and os.path.exists(temp_dir):
+        # Always clean up our own temporary directory if we created one
+        if own_temp_dir and os.path.exists(own_temp_dir):
             try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                shutil.rmtree(own_temp_dir, ignore_errors=True)
             except Exception:
                 pass
-        _current_temp_dir = None
+            if _current_temp_dir == own_temp_dir:
+                _current_temp_dir = None
+
+
+def get_track_metadata(file_path: Path) -> Tuple[Optional[str], int, int]:
+    """Return (album, disc_number, track_number) from MP4 tags."""
+    if not HAS_MUTAGEN:
+        return None, 0, 0
+    try:
+        audio = MP4(str(file_path))
+        tags = audio.tags or {}
+        album_vals = tags.get("\xa9alb")
+        album = str(album_vals[0]).strip() if album_vals and album_vals[0] else None
+        disc_vals = tags.get("disk")
+        disc = int(disc_vals[0][0]) if disc_vals and disc_vals[0] else 0
+        track_vals = tags.get("trkn")
+        track = int(track_vals[0][0]) if track_vals and track_vals[0] else 0
+        return album or None, disc, track
+    except Exception:
+        return None, 0, 0
+
+
+def build_gapless_plan(
+    dir_files: List[Path],
+) -> Tuple[List[Path], Dict[Path, Tuple[Optional[Path], Optional[Path]]]]:
+    """
+    For a directory of .m4a files, verify that every file shares the exact same
+    non-empty album tag. If so, return the tracks sorted by (disc, track, name)
+    and a mapping of file -> (gapless_before, gapless_after) within each disc.
+    Otherwise, return (dir_files, {}).
+    """
+    if len(dir_files) <= 1 or not HAS_MUTAGEN:
+        return dir_files, {}
+
+    meta = {p: get_track_metadata(p) for p in dir_files}
+    albums = {meta[p][0] for p in dir_files}
+    if None in albums or len(albums) != 1:
+        return dir_files, {}
+
+    sorted_files = sorted(dir_files, key=lambda p: (meta[p][1], meta[p][2], p.name))
+    neighbors: Dict[Path, Tuple[Optional[Path], Optional[Path]]] = {}
+    for i, p in enumerate(sorted_files):
+        disc = meta[p][1]
+        before = sorted_files[i - 1] if i > 0 and meta[sorted_files[i - 1]][1] == disc else None
+        after = (
+            sorted_files[i + 1]
+            if i + 1 < len(sorted_files) and meta[sorted_files[i + 1]][1] == disc
+            else None
+        )
+        neighbors[p] = (before, after)
+    return sorted_files, neighbors
 
 
 def find_m4a_files(targets: List[Path], recursive: bool = False) -> List[Path]:
@@ -414,7 +533,7 @@ def main():
     args = parser.parse_args()
 
     # Check for required macOS utilities
-    for tool in ["afconvert", "afinfo"]:
+    for tool in ["afconvert", "afinfo", "afhash"]:
         if not check_tool_installed(tool):
             print(f"Error: Required tool '{tool}' not found in PATH. This script requires macOS.", file=sys.stderr)
             sys.exit(1)
@@ -445,28 +564,70 @@ def main():
     skip_count = 0
     fail_count = 0
 
+    # Group files by parent directory (preserving discovery order)
+    files_by_dir: Dict[Path, List[Path]] = {}
+    for file_path in files:
+        files_by_dir.setdefault(file_path.parent, []).append(file_path)
+
+    idx = 0
+    total_files = len(files)
+
     try:
-        for idx, file_path in enumerate(files, start=1):
-            rel_name = file_path.name
-            print(f"[{idx}/{len(files)}] Processing: {rel_name} ...", end=" ", flush=True)
+        global _current_temp_dir
+        for parent_dir, dir_files in files_by_dir.items():
+            ordered_files, gapless_neighbors = build_gapless_plan(dir_files)
+            use_gapless_batch = bool(gapless_neighbors) and not args.dry_run
 
-            success, message = convert_alac_to_aac(
-                file_path=file_path,
-                bitrate=args.bitrate,
-                force=args.force,
-                dry_run=args.dry_run,
-                copy_metadata=(not args.no_tags),
-            )
+            batch_temp_dir: Optional[str] = None
+            staged_replacements: List[Tuple[Path, Path]] = []
 
-            if success:
-                success_count += 1
-                print(f"OK ({message})")
-            elif "Skipped" in message:
-                skip_count += 1
-                print(message)
-            else:
-                fail_count += 1
-                print(f"FAILED ({message})")
+            if use_gapless_batch:
+                batch_temp_dir = tempfile.mkdtemp(prefix=".afconvert_tmp_", dir=parent_dir)
+                _current_temp_dir = batch_temp_dir
+
+            try:
+                for file_path in ordered_files:
+                    idx += 1
+                    rel_name = file_path.name
+                    print(f"[{idx}/{total_files}] Processing: {rel_name} ...", end=" ", flush=True)
+
+                    before, after = gapless_neighbors.get(file_path, (None, None))
+                    staged_out = (Path(batch_temp_dir) / file_path.name) if batch_temp_dir else None
+
+                    success, message = convert_alac_to_aac(
+                        file_path=file_path,
+                        bitrate=args.bitrate,
+                        force=args.force,
+                        dry_run=args.dry_run,
+                        copy_metadata=(not args.no_tags),
+                        gapless_before=before,
+                        gapless_after=after,
+                        staged_out=staged_out,
+                    )
+
+                    if success:
+                        success_count += 1
+                        if staged_out is not None:
+                            staged_replacements.append((staged_out, file_path))
+                        print(f"OK ({message})")
+                    elif "Skipped" in message:
+                        skip_count += 1
+                        print(message)
+                    else:
+                        fail_count += 1
+                        print(f"FAILED ({message})")
+
+                # Replace all succeeded tracks in the directory after all gapless encodes finish
+                for staged_out, target_path in staged_replacements:
+                    os.replace(staged_out, target_path)
+            finally:
+                if batch_temp_dir and os.path.exists(batch_temp_dir):
+                    try:
+                        shutil.rmtree(batch_temp_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    if _current_temp_dir == batch_temp_dir:
+                        _current_temp_dir = None
 
     except KeyboardInterrupt:
         _signal_handler(signal.SIGINT, None)
