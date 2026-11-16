@@ -2,16 +2,15 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #     "mutagen",
-#     "pillow",
 # ]
 # ///
 """
 Recursively scans for directories containing cover.jpg, cover.png, or cover.jxl.
 For each directory:
 - Checks the width of the cover image.
-- If width <= 600 and JPEG/PNG: embeds the original image directly.
-- If width <= 600 and JXL: converts to JPEG at original size in /tmp and embeds that.
-- If width > 600: resizes to 600x600 in /tmp (as JPEG for JPG/JXL, PNG for PNG) and embeds that.
+- If width <= 600 and JPEG: embeds the original image directly.
+- If PNG or JXL with width <= 600: converts to JPEG at original size in /tmp via sips and embeds that.
+- If width > 600: resizes to 600x600 max as JPEG in /tmp via sips and embeds that.
 - Embeds the artwork into every .mp3 and .m4a file in that directory.
 - Ensures the final audio file contains ONLY that artwork (removes any previous artwork).
 - Preserves all other audio metadata tags untouched.
@@ -21,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import os
 import shutil
 import subprocess
@@ -32,25 +30,27 @@ import mutagen
 from mutagen.id3 import APIC, ID3
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover
-from PIL import Image
 
-def open_image(path: Path) -> Image.Image:
-    """Open an image using PIL, using djxl CLI for JPEG XL."""
-    if path.suffix.lower() == ".jxl":
-        if not shutil.which("djxl"):
-            raise RuntimeError("djxl CLI is required to decode .jxl images but was not found in PATH")
-        res = subprocess.run(
-            ["djxl", str(path), "-", "--output_format", "png"],
-            capture_output=True,
-            check=True,
-        )
-        img = Image.open(io.BytesIO(res.stdout))
-        img.load()
-        return img
 
-    img = Image.open(path)
-    img.load()
-    return img
+def get_image_info(path: Path) -> tuple[int, int, str]:
+    """Return (width, height, format_upper) using macOS sips."""
+    res = subprocess.run(
+        ["sips", "-g", "pixelWidth", "-g", "pixelHeight", "-g", "format", str(path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    width = height = 0
+    fmt = ""
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("pixelWidth:"):
+            width = int(line.split(":", 1)[1].strip())
+        elif line.startswith("pixelHeight:"):
+            height = int(line.split(":", 1)[1].strip())
+        elif line.startswith("format:"):
+            fmt = line.split(":", 1)[1].strip().upper()
+    return width, height, fmt
 
 
 def get_cover_file(dir_path: Path, filenames: list[str]) -> Path | None:
@@ -62,53 +62,60 @@ def get_cover_file(dir_path: Path, filenames: list[str]) -> Path | None:
     return None
 
 
-def prepare_cover_data(cover_path: Path) -> tuple[bytes, str, str]:
+def prepare_cover_data(cover_path: Path, max_size: int = 600) -> tuple[bytes, str, str]:
     """
-    Inspect cover image dimensions and format based purely on binary data (Pillow img.format).
+    Inspect cover image dimensions and format using sips (decoding .jxl via djxl first).
     Returns:
         (image_bytes, mime_type, description_string)
     """
     is_jxl_file = cover_path.suffix.lower() == ".jxl"
-
-    with open_image(cover_path) as img:
-        width, height = img.size
-        img_format = "JXL" if is_jxl_file else (img.format or "").upper()
-
-    is_png = img_format == "PNG"
-    is_jpeg = img_format in ("JPEG", "JPG")
-
-    # If width <= 600 and already standard JPEG/PNG, embed directly (JXL cannot be embedded directly)
-    if width <= 600 and (is_png or is_jpeg) and not is_jxl_file:
-        mime = "image/png" if is_png else "image/jpeg"
-        desc = f"Direct original ({width}x{height}, {img_format})"
-        return cover_path.read_bytes(), mime, desc
-
-    # Either width > 600 or non-standard format (e.g. JXL, WebP) converted to JPEG/PNG in /tmp
-    ext = ".png" if is_png and not is_jxl_file else ".jpg"
     file_hash = hashlib.md5(str(cover_path.resolve()).encode()).hexdigest()[:10]
-    tmp_path = Path("/tmp") / f"resized_600x600_{file_hash}{ext}"
+    decoded_jxl_path: Path | None = None
+    working_path = cover_path
 
-    with open_image(cover_path) as img:
-        if width > 600:
-            # Resize preserving aspect ratio (neither dimension exceeds 600)
-            img.thumbnail((600, 600), Image.Resampling.LANCZOS)
-        new_w, new_h = img.size
+    try:
+        if is_jxl_file:
+            if not shutil.which("djxl"):
+                raise RuntimeError("djxl CLI is required to decode .jxl images but was not found in PATH")
+            decoded_jxl_path = Path("/tmp") / f"jxl_decoded_{file_hash}.png"
+            subprocess.run(
+                ["djxl", str(cover_path), str(decoded_jxl_path)],
+                capture_output=True,
+                check=True,
+            )
+            working_path = decoded_jxl_path
 
-        if is_png and not is_jxl_file:
-            img.save(tmp_path, format="PNG", optimize=True)
-            mime = "image/png"
+        width, height, img_format = get_image_info(working_path)
+        if is_jxl_file:
+            img_format = "JXL"
+
+        is_jpeg = img_format in ("JPEG", "JPG")
+
+        # If width <= max_size and already JPEG, embed directly (PNG/JXL are always converted to JPEG)
+        if width <= max_size and is_jpeg and not is_jxl_file:
+            desc = f"Direct original ({width}x{height}, {img_format})"
+            return cover_path.read_bytes(), "image/jpeg", desc
+
+        # Convert/resize to JPEG in /tmp via sips
+        tmp_path = Path("/tmp") / f"resized_{max_size}x{max_size}_{file_hash}.jpg"
+
+        sips_cmd = ["sips"]
+        if width > max_size:
+            sips_cmd.extend(["-Z", str(max_size)])
+        sips_cmd.extend(["-s", "format", "jpeg", "-s", "formatOptions", "normal", str(working_path), "--out", str(tmp_path)])
+        subprocess.run(sips_cmd, check=True, stdout=subprocess.DEVNULL)
+
+        new_w, new_h, _ = get_image_info(tmp_path)
+
+        if width <= max_size:
+            desc = f"Converted via sips in /tmp ({img_format} -> JPEG {new_w}x{new_h}, {tmp_path.name})"
         else:
-            if img.mode not in ("RGB", "L"):
-                img = img.convert("RGB")
-            img.save(tmp_path, format="JPEG", quality=92, optimize=True)
-            mime = "image/jpeg"
+            desc = f"Resized via sips in /tmp preserving aspect ratio ({img_format} {width}x{height} -> JPEG {new_w}x{new_h}, {tmp_path.name})"
 
-    if width <= 600:
-        desc = f"Converted in /tmp ({img_format} -> JPEG {new_w}x{new_h}, {tmp_path.name})"
-    else:
-        desc = f"Resized in /tmp preserving aspect ratio ({img_format} {width}x{height} -> {new_w}x{new_h}, {tmp_path.name})"
-
-    return tmp_path.read_bytes(), mime, desc
+        return tmp_path.read_bytes(), "image/jpeg", desc
+    finally:
+        if decoded_jxl_path is not None and decoded_jxl_path.exists():
+            decoded_jxl_path.unlink(missing_ok=True)
 
 
 def embed_art_in_mp3(file_path: Path, image_bytes: bytes, mime_type: str) -> bool:
@@ -249,13 +256,14 @@ def embed_artwork_in_file(file_path: Path, image_bytes: bytes, mime_type: str) -
     return False
 
 
-def process_directories(root_dir: str, dry_run: bool = False) -> None:
+def process_directories(root_dir: str, dry_run: bool = False, max_size: int = 600) -> None:
     target_path = Path(root_dir).resolve()
     if not target_path.exists():
         print(f"Error: Target path '{root_dir}' does not exist.", file=sys.stderr)
         sys.exit(1)
 
     print(f"Scanning directory: {target_path}")
+    print(f"Target max size   : {max_size}px")
     print(f"Mode              : {'DRY RUN (no files modified)' if dry_run else 'LIVE (updating tags)'}")
     print("=" * 80)
 
@@ -286,7 +294,7 @@ def process_directories(root_dir: str, dry_run: bool = False) -> None:
         total_directories += 1
 
         try:
-            image_bytes, mime_type, desc = prepare_cover_data(cover_path)
+            image_bytes, mime_type, desc = prepare_cover_data(cover_path, max_size=max_size)
         except Exception as e:
             print(f"[ERROR] Could not process cover '{cover_path}': {e}", file=sys.stderr)
             continue
@@ -327,7 +335,7 @@ def process_directories(root_dir: str, dry_run: bool = False) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Embed cover.jpg or cover.png into mp3/m4a files (directly if width <= 600, or resized to 600x600 in /tmp)."
+        description="Embed cover.jpg, cover.png, or cover.jxl into mp3/m4a files as JPEG (resizing to target size in /tmp if wider)."
     )
     parser.add_argument(
         "directory",
@@ -336,13 +344,21 @@ def main():
         help="Root directory to recursively scan (default: current directory)",
     )
     parser.add_argument(
+        "-s", "--size",
+        type=int,
+        default=600,
+        help="Target maximum cover width/dimension in pixels (default: 600)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Simulate the run without modifying any audio files",
     )
 
     args = parser.parse_args()
-    process_directories(args.directory, dry_run=args.dry_run)
+    if args.size <= 0:
+        parser.error("--size must be a positive integer")
+    process_directories(args.directory, dry_run=args.dry_run, max_size=args.size)
 
 
 if __name__ == "__main__":

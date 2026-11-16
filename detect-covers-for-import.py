@@ -16,7 +16,18 @@ from mutagen.mp4 import MP4, MP4Cover
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".jxl"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a"}
+PREFERRED_COVER_NAMES = ("cover", "folder", "front")
 MAX_EMBED_IMAGE_BYTES = 500 * 1024
+
+
+def _image_sort_key(filename: str) -> Tuple[int, str, str]:
+    """Sort key prioritizing cover.*, folder.*, front.*, then alphabetical."""
+    stem = os.path.splitext(filename)[0].lower()
+    try:
+        priority = PREFERRED_COVER_NAMES.index(stem)
+    except ValueError:
+        priority = len(PREFERRED_COVER_NAMES)
+    return (priority, filename.lower(), filename)
 
 
 def extract_artwork(audio_path: str) -> Optional[Tuple[bytes, str]]:
@@ -166,6 +177,21 @@ def process_directories(root_dir: str) -> None:
                 image_files.append(file_name)
             elif ext in AUDIO_EXTENSIONS:
                 audio_files.append(file_name)
+
+        image_files.sort(key=_image_sort_key)
+
+        # If there are multiple images in the directory, trash all except the first
+        if len(image_files) > 1:
+            kept = [image_files[0]]
+            for extra_name in image_files[1:]:
+                extra_path = os.path.join(current_dir, extra_name)
+                try:
+                    print(f"[TRASH] Trashing extra image {extra_path}...")
+                    subprocess.run(["trash", extra_path], check=True)
+                except Exception as e:
+                    print(f"[ERROR] Failed trashing {extra_path}: {e}", file=sys.stderr)
+                    kept.append(extra_name)
+            image_files = kept
 
         # Condition 1: If there is no image in the directory and multiple audio files,
         # scan audio files and extract the first embedded image found to cover.jpg or cover.png
