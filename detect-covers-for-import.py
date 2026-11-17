@@ -194,22 +194,35 @@ def process_directories(root_dir: str) -> None:
             image_files = kept
 
         # Condition 1: If there is no image in the directory and multiple audio files,
-        # scan audio files and extract the first embedded image found to cover.jpg or cover.png
+        # extract cover.jpg or cover.png only if every audio file has the same embedded artwork
         if len(image_files) == 0 and len(audio_files) > 1:
+            first_artwork: Optional[Tuple[bytes, str]] = None
+            first_audio_path = ""
+            all_same = True
+
             for audio_name in sorted(audio_files):
                 audio_path = os.path.join(current_dir, audio_name)
                 extracted = extract_artwork(audio_path)
-                if extracted is not None:
-                    img_data, img_type = extracted
-                    target_name = f"cover.{img_type}"
-                    target_path = os.path.join(current_dir, target_name)
-                    try:
-                        with open(target_path, "wb") as f:
-                            f.write(img_data)
-                        print(f"[EXTRACT] Extracted {target_name} from {audio_path}")
-                    except Exception as e:
-                        print(f"[ERROR] Failed writing {target_path}: {e}", file=sys.stderr)
+                if extracted is None:
+                    all_same = False
                     break
+                if first_artwork is None:
+                    first_artwork = extracted
+                    first_audio_path = audio_path
+                elif extracted[0] != first_artwork[0]:
+                    all_same = False
+                    break
+
+            if all_same and first_artwork is not None:
+                img_data, img_type = first_artwork
+                target_name = f"cover.{img_type}"
+                target_path = os.path.join(current_dir, target_name)
+                try:
+                    with open(target_path, "wb") as f:
+                        f.write(img_data)
+                    print(f"[EXTRACT] Extracted {target_name} from {first_audio_path}")
+                except Exception as e:
+                    print(f"[ERROR] Failed writing {target_path}: {e}", file=sys.stderr)
             continue
 
         # Condition 2: If the directory contains a single image and any audio files
