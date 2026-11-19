@@ -12,6 +12,7 @@ import unicodedata
 from pathlib import Path
 
 AUDIO_EXTENSIONS = {".m4a", ".mp3"}
+MUSIC_DIR_ENV = "MUSIC_DIR"
 ANSI_RED = "\033[31m"
 ANSI_GREEN = "\033[32m"
 ANSI_RESET = "\033[0m"
@@ -121,9 +122,20 @@ def tag_directory_green(dir_path: Path) -> None:
     )
 
 
+def resolve_music_dir() -> Path:
+    """Return the Music directory from MUSIC_DIR env var if set, otherwise ~/Music."""
+    env_path = os.environ.get(MUSIC_DIR_ENV, "").strip()
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    return Path.home() / "Music"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check if albums (via mdls kMDItemAlbum) from .m4a/.mp3 files already exist in ~/Music."
+        description=(
+            "Check if albums (via mdls kMDItemAlbum) from .m4a/.mp3 files already exist "
+            f"in ${MUSIC_DIR_ENV} (default: ~/Music)."
+        )
     )
     parser.add_argument(
         "directory",
@@ -139,7 +151,7 @@ def main() -> int:
         print(f"Error: Directory does not exist: {scan_dir}", file=sys.stderr)
         return 1
 
-    music_dir = Path.home() / "Music"
+    music_dir = resolve_music_dir()
     music_entries = index_music_directory(music_dir)
 
     seen_albums: set[tuple[str, tuple[str, ...]]] = set()
