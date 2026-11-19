@@ -14,6 +14,7 @@ uv run "$SCRIPT_DIR/embed_cover_art.py"
 uv run "$SCRIPT_DIR/add_aac_hash.py"
 
 uv run "$SCRIPT_DIR/check_albums_in_music.py"
-uv run "$SCRIPT_DIR/check_max_frequency.py"
 uv run "$SCRIPT_DIR/check_short_audio.py"
 uv run "$SCRIPT_DIR/check_indices.py"
+
+uv run "$SCRIPT_DIR/random_spek_preview.py"
