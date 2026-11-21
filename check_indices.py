@@ -23,9 +23,12 @@ ANSI_RED = "\033[31m"
 ANSI_RESET = "\033[0m"
 
 
-def _parse_positive_int(raw: object) -> int | None:
+def _parse_int_part(raw: object, part_index: int = 0) -> int | None:
     """Parse a positive integer from a tag string like '3' or '3/12'."""
-    text = str(raw).split("/", 1)[0].strip()
+    parts = str(raw).split("/", 1)
+    if part_index >= len(parts):
+        return None
+    text = parts[part_index].strip()
     if not text:
         return None
     try:
@@ -35,31 +38,41 @@ def _parse_positive_int(raw: object) -> int | None:
     return value if value > 0 else None
 
 
-def get_disc_and_track(audio_path: Path) -> tuple[int, int | None]:
-    """Read (disc_number, track_number) from tags in read-only mode. Defaults disc to 1."""
+def get_disc_and_track(audio_path: Path) -> tuple[int, int | None, int | None]:
+    """Read (disc_number, track_number, total_tracks) from tags in read-only mode. Defaults disc to 1."""
     ext = audio_path.suffix.lower()
     try:
         if ext == ".m4a":
             tags = MP4(audio_path).tags
             if not tags:
-                return 1, None
+                return 1, None, None
             disc_tag = tags.get("disk")
             track_tag = tags.get("trkn")
             disc_num = disc_tag[0][0] if disc_tag and disc_tag[0] else 0
             track_num = track_tag[0][0] if track_tag and track_tag[0] else 0
-            return (disc_num if disc_num > 0 else 1), (track_num if track_num > 0 else None)
+            total_tracks = (
+                track_tag[0][1]
+                if track_tag and track_tag[0] and len(track_tag[0]) > 1
+                else 0
+            )
+            return (
+                (disc_num if disc_num > 0 else 1),
+                (track_num if track_num > 0 else None),
+                (total_tracks if total_tracks > 0 else None),
+            )
 
         if ext == ".mp3":
             tags = ID3(audio_path)
             tpos = tags.get("TPOS")
             trck = tags.get("TRCK")
-            disc_num = _parse_positive_int(tpos.text[0]) if tpos and tpos.text else None
-            track_num = _parse_positive_int(trck.text[0]) if trck and trck.text else None
-            return (disc_num or 1), track_num
+            disc_num = _parse_int_part(tpos.text[0], 0) if tpos and tpos.text else None
+            track_num = _parse_int_part(trck.text[0], 0) if trck and trck.text else None
+            total_tracks = _parse_int_part(trck.text[0], 1) if trck and trck.text else None
+            return (disc_num or 1), track_num, total_tracks
     except Exception:
-        return 1, None
+        return 1, None, None
 
-    return 1, None
+    return 1, None, None
 
 
 def main() -> int:
@@ -92,28 +105,33 @@ def main() -> int:
             continue
 
         discs: dict[int, Counter[int]] = defaultdict(Counter)
+        expected_totals: dict[int, int] = {}
         for audio_path in audio_files:
-            disc_num, track_num = get_disc_and_track(audio_path)
+            disc_num, track_num, total_tracks = get_disc_and_track(audio_path)
             if track_num is not None:
                 discs[disc_num][track_num] += 1
+            if total_tracks is not None:
+                expected_totals[disc_num] = max(expected_totals.get(disc_num, 0), total_tracks)
 
-        if not discs:
+        all_discs = sorted(set(discs) | set(expected_totals))
+        if not all_discs:
             continue
 
         rel_dir = "." if dir_path == root_dir else str(dir_path.relative_to(root_dir))
-        max_disc = max(discs)
+        max_disc = max(all_discs)
         if max_disc > 1:
-            missing_discs = [d for d in range(1, max_disc + 1) if d not in discs]
+            missing_discs = [d for d in range(1, max_disc + 1) if d not in all_discs]
             if missing_discs:
                 missing_disc_str = ", ".join(str(d) for d in missing_discs)
                 print(f"{ANSI_RED}Missing discs [{missing_disc_str}] - {rel_dir}{ANSI_RESET}")
 
-        for disc_num in sorted(discs):
+        for disc_num in all_discs:
             track_counts = discs[disc_num]
-            max_index = max(track_counts)
-            missing = [i for i in range(1, max_index + 1) if i not in track_counts]
+            max_index = max(track_counts, default=0)
+            upper_bound = max(max_index, expected_totals.get(disc_num, 0))
+            missing = [i for i in range(1, upper_bound + 1) if i not in track_counts]
             duplicates = sorted(num for num, count in track_counts.items() if count > 1)
-            disc_label = f" (Disc {disc_num})" if len(discs) > 1 or disc_num > 1 else ""
+            disc_label = f" (Disc {disc_num})" if len(all_discs) > 1 or disc_num > 1 else ""
 
             if missing:
                 missing_str = ", ".join(str(i) for i in missing)

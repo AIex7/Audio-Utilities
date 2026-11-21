@@ -13,9 +13,6 @@ from pathlib import Path
 
 AUDIO_EXTENSIONS = {".m4a", ".mp3"}
 MUSIC_DIR_ENV = "MUSIC_DIR"
-ANSI_RED = "\033[31m"
-ANSI_GREEN = "\033[32m"
-ANSI_RESET = "\033[0m"
 FINDER_TAGS_XATTR = "com.apple.metadata:_kMDItemUserTags"
 GREEN_FINDER_TAG = "Green\n2"
 
@@ -177,14 +174,9 @@ def main() -> int:
                 continue
             seen_albums.add(album_key)
 
-            label = f"{album} ({', '.join(authors)})" if authors else album
             match_rel_path = find_album_in_music(album, authors, music_entries)
-            if match_rel_path is not None:
-                print(f"{ANSI_RED}{label} - Album Exists at {match_rel_path}{ANSI_RESET}")
-            else:
-                print(f"{ANSI_GREEN}{label} - Album does not exist yet{ANSI_RESET}")
-                if file_path.parent.resolve() != cwd:
-                    tag_directory_green(file_path.parent)
+            if match_rel_path is None and file_path.parent.resolve() != cwd:
+                tag_directory_green(file_path.parent)
 
     return 0
 
