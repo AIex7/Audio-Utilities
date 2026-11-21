@@ -6,17 +6,14 @@
 # ]
 # ///
 """
-Convert ALAC (Apple Lossless) M4A files to AAC at 300 kbps VBR using Apple's afconvert.
+Convert ALAC (Apple Lossless) M4A files to AAC at 256 kbps VBR using Apple's afconvert.
 
 Key features:
 - Uses Apple afconvert with highest quality settings:
-    -d aac -f m4af -s 2 -b 300000 -q 127 -r 127 --src-complexity bats --soundcheck-generate
+    -d aac -f m4af -s 2 -b 256000 -q 127 -r 127 --src-complexity bats --soundcheck-generate
 - Copies all MP4/M4A metadata tags and embedded cover artwork using mutagen.
-- Computes and embeds an SHA-1 integrity hash of the raw encoded AAC audio packets (AAC_HASH).
-- Runs afhash on the source ALAC file and embeds the audio hash line in ALAC_HASH.
 - Sets the Encoded By / Encoding Tool tag (©too) to the afconvert command and flags used.
-- Supports gapless album encoding (--gapless-before / --gapless-after) when all .m4a files in a directory share the same album tag.
-- Protects stream-specific metadata: iTunNORM (SoundCheck), iTunSMPB (gapless), ©too, AAC_HASH, and ALAC_HASH.
+- Protects stream-specific metadata: iTunNORM (SoundCheck), iTunSMPB (gapless), and ©too.
 - Detects ALAC streams via afinfo so non-ALAC / already AAC files are skipped.
 - Safe temp file handling: encodes into a hidden temp folder on the same directory/mount.
 - Atomic replacement on success: original file is only replaced once encoding succeeds with no errors.
@@ -210,8 +207,6 @@ def copy_tags(
     - iTunNORM (SoundCheck volume normalization)
     - iTunSMPB (Gapless playback priming and remainder padding)
     - ©too (Encoded By / Encoding Tool and afconvert flags)
-    - AAC_HASH (SHA-1 hash of the newly encoded AAC mdat audio packets)
-    - ALAC_HASH (afhash output of the source ALAC audio data)
 
     Returns:
         (success: bool, error_message: Optional[str])
@@ -224,18 +219,11 @@ def copy_tags(
         if dst.tags is None:
             dst.add_tags()
 
-        # Compute SHA-1 hash of the newly encoded raw AAC audio packets (mdat payload)
-        audio_hash = compute_audio_packets_hash(dst_path)
-        # Run afhash on the source ALAC file
-        alac_hash = get_source_afhash(src_path)
-
         # Protected stream-specific tags
         protected_keys = {
             "----:com.apple.iTunes:iTunNORM",
             "----:com.apple.iTunes:iTunSMPB",
             "\xa9too",
-            "----:com.apple.iTunes:AAC_HASH",
-            "----:com.apple.iTunes:ALAC_HASH",
         }
         # Snapshot any existing destination values created by afconvert
         preserved_tags = {k: dst.tags[k] for k in protected_keys if k in dst.tags}
@@ -243,19 +231,6 @@ def copy_tags(
         # Record afconvert command and flags in the Encoded By / Encoding Tool tag
         if encoded_by:
             preserved_tags["\xa9too"] = [encoded_by]
-
-        # Store AAC mdat SHA-1 hash in AAC_HASH as UTF-8
-        if audio_hash:
-            aac_hash_str = f"SHA1 Hash of mdat audio packets : {audio_hash}"
-            preserved_tags["----:com.apple.iTunes:AAC_HASH"] = [
-                MP4FreeForm(aac_hash_str.encode("utf-8"), AtomDataType.UTF8)
-            ]
-
-        # Store source ALAC afhash output in ALAC_HASH as UTF-8
-        if alac_hash:
-            preserved_tags["----:com.apple.iTunes:ALAC_HASH"] = [
-                MP4FreeForm(alac_hash.encode("utf-8"), AtomDataType.UTF8)
-            ]
 
         # Copy all source tags except the protected ones
         if src.tags:
