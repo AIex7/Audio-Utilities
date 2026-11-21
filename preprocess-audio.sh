@@ -12,8 +12,8 @@ uv run "$SCRIPT_DIR/convert_to_16bit.py"
 
 
 uv run "$SCRIPT_DIR/detect-covers-for-import.py"
-python3 "$SCRIPT_DIR/convert_jpeg_to_jxl.py" -e 10
-uv run "$SCRIPT_DIR/embed_cover_art.py"
+# python3 "$SCRIPT_DIR/convert_jpeg_to_jxl.py" -e 10
+uv run "$SCRIPT_DIR/embed_cover_art.py" -s 1400
 # uv run "$SCRIPT_DIR/add_aac_hash.py"
 
 uv run "$SCRIPT_DIR/check_albums_in_music.py"
@@ -23,3 +23,5 @@ uv run "$SCRIPT_DIR/check_indices.py"
 uv run "$SCRIPT_DIR/check_missing_metadata.py"
 
 uv run "$SCRIPT_DIR/random_spek_preview.py"
+
+find . -type f \( -iname "*.jxl" -o -iname "*.png" -o -iname "*.jpeg" -o -iname "*.jpg" \) -exec trash {} +

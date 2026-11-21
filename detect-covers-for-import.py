@@ -225,55 +225,19 @@ def process_directories(root_dir: str) -> None:
                     print(f"[ERROR] Failed writing {target_path}: {e}", file=sys.stderr)
             continue
 
-        # Condition 2: If the directory contains a single image and any audio files
-        if len(image_files) != 1 or len(audio_files) == 0:
+        # Condition 2: If the directory contains a single image and multiple audio files
+        if len(image_files) != 1 or len(audio_files) <= 1:
             continue
 
         image_path = os.path.join(current_dir, image_files[0])
 
-        if len(audio_files) == 1:
-            if os.path.splitext(image_path)[1].lower() == ".jxl":
-                print(f"[SKIP] Cannot embed .jxl directly into audio file: {image_path}")
-                continue
-            audio_path = os.path.join(current_dir, audio_files[0])
-            embed_path = image_path
-            converted_path = None
-            try:
-                original_size = os.path.getsize(image_path)
-                if original_size > MAX_EMBED_IMAGE_BYTES:
-                    print(f"[COMPRESS] {image_path} > 500 KiB; converting to normal-quality JPG...")
-                    converted_path = convert_to_normal_jpg(image_path)
-                    converted_size = os.path.getsize(converted_path)
-                    if converted_size < original_size:
-                        embed_path = converted_path
-                    else:
-                        print(
-                            f"[COMPRESS] Converted JPG ({converted_size} B) is not smaller than original "
-                            f"({original_size} B); using original."
-                        )
-
-                print(f"[EMBED] Embedding {embed_path} into {audio_path}...")
-                embed_artwork(audio_path, embed_path)
-
-                if converted_path is not None:
-                    print(f"[TRASH] Trashing {converted_path}...")
-                    subprocess.run(["trash", converted_path], check=True)
-                    converted_path = None
-
-                print(f"[TRASH] Trashing {image_path}...")
-                subprocess.run(["trash", image_path], check=True)
-            except Exception as e:
-                if converted_path is not None and os.path.exists(converted_path):
-                    os.remove(converted_path)
-                print(f"[ERROR] Failed processing {audio_path}: {e}", file=sys.stderr)
-        else:
-            # More than one audio file: rename image to cover.jpg, cover.png, or cover.jxl
-            try:
-                new_path = rename_image_to_cover(image_path)
-                if new_path != image_path:
-                    print(f"[RENAME] {image_path} -> {new_path}")
-            except Exception as e:
-                print(f"[ERROR] Failed renaming {image_path}: {e}", file=sys.stderr)
+        # More than one audio file: rename image to cover.jpg, cover.png, or cover.jxl
+        try:
+            new_path = rename_image_to_cover(image_path)
+            if new_path != image_path:
+                print(f"[RENAME] {image_path} -> {new_path}")
+        except Exception as e:
+            print(f"[ERROR] Failed renaming {image_path}: {e}", file=sys.stderr)
 
 
 def main():
