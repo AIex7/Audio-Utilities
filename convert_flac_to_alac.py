@@ -6,14 +6,10 @@
 # ]
 # ///
 """
-Recursively inspect .flac files using `afinfo` and convert any FLAC file with
-bit depth > 16-bit or sample rate > 48 kHz to 16-bit ALAC (.m4a) using `afconvert`
-at maximum quality settings, copy all metadata and artwork via `mutagen`,
-verify the embedded hash, and remove the original .flac.
-
-Target sample rate:
-- 44100 Hz if source sample rate is a multiple of 44100 Hz
-- 48000 Hz otherwise
+Recursively inspect .flac files using `afinfo` and convert them losslessly to
+ALAC (.m4a) at their native sample rate and bit depth using `afconvert`, copy
+all metadata and artwork via `mutagen`, verify the embedded hash, and remove
+the original .flac.
 """
 
 from __future__ import annotations
@@ -28,14 +24,13 @@ import tempfile
 from pathlib import Path
 
 from mutagen.flac import FLAC
-from mutagen.mp4 import AtomDataType, MP4, MP4Cover, MP4FreeForm
+from mutagen.mp4 import MP4, MP4Cover
 
 DATA_FORMAT_RE = re.compile(
     r"Data format:\s+\d+\s+ch,\s+([0-9]+(?:\.[0-9]+)?)\s+Hz,\s+([^\s,(]+)(.*)"
 )
 BIT_DEPTH_SOURCE_RE = re.compile(r"source bit depth:\s*[A-Za-z]+(\d+)", re.IGNORECASE)
 BIT_DEPTH_FORMAT_RE = re.compile(r"(?:from\s+)?(\d+)-bit", re.IGNORECASE)
-AFHASH_RE = re.compile(r"SHA1 Hash of audio data\s*:\s*([0-9a-fA-F]{40})")
 
 TEXT_TAG_MAP: tuple[tuple[tuple[str, ...], str], ...] = (
     (("title",), "\xa9nam"),
@@ -93,7 +88,6 @@ def copy_flac_tags_to_m4a(
     flac_path: Path,
     m4a_path: Path,
     encoded_by: str | None = None,
-    itun_hash: bytes | None = None,
 ) -> None:
     """Copy Vorbis comments and embedded pictures from flac_path into m4a_path via mutagen."""
     flac = FLAC(flac_path)
@@ -103,10 +97,6 @@ def copy_flac_tags_to_m4a(
 
     if encoded_by:
         m4a.tags["\xa9too"] = [encoded_by]
-    if itun_hash is not None:
-        m4a.tags["----:com.apple.iTunes:iTunHASH"] = [
-            MP4FreeForm(itun_hash, dataformat=AtomDataType.UTF8)
-        ]
 
     for flac_keys, mp4_key in TEXT_TAG_MAP:
         for key in flac_keys:
@@ -199,38 +189,33 @@ def inspect_flac(afinfo: str, audio_path: Path) -> tuple[str, float, int] | None
     return codec, sample_rate, bit_depth
 
 
-def compute_afhash_bytes(afhash: str, audio_path: Path) -> bytes | None:
-    """Run `afhash` on audio_path and return the 20-byte SHA-1 digest, or None."""
-    result = subprocess.run(
-        [afhash, str(audio_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-    match = AFHASH_RE.search(result.stdout)
-    if not match:
-        return None
-    return bytes.fromhex(match.group(1))
+ALAC_BIT_DEPTH_FLAGS = {
+    16: 1,
+    20: 2,
+    24: 3,
+    32: 4,
+}
 
 
-def target_sample_rate(sample_rate: float) -> int:
-    """Return 44100 if sample_rate is a multiple of 44100 Hz, otherwise 48000."""
-    if sample_rate > 0 and float(sample_rate).is_integer() and int(sample_rate) % 44100 == 0:
-        return 44100
-    return 48000
+def alac_format_flag(bit_depth: int) -> tuple[int, int]:
+    """Return (target_bit_depth, CoreAudio_alac_format_flag) preserving lossless precision."""
+    if bit_depth <= 16:
+        return 16, 1
+    if bit_depth in ALAC_BIT_DEPTH_FLAGS:
+        return bit_depth, ALAC_BIT_DEPTH_FLAGS[bit_depth]
+    if bit_depth < 24:
+        return 24, 3
+    return 32, 4
 
 
 def convert_file(
     afinfo: str,
     afconvert: str,
-    afhash: str,
     audio_path: Path,
     root: Path,
     dry_run: bool = False,
 ) -> str:
-    """Inspect a single .flac file and convert to 16-bit ALAC (.m4a) if needed."""
+    """Inspect a single .flac file and convert losslessly to ALAC (.m4a)."""
     rel_path = audio_path.relative_to(root)
     destination = audio_path.with_suffix(".m4a")
     if destination.exists():
@@ -247,22 +232,20 @@ def convert_file(
         print(f"[SKIP] Not FLAC ({codec}): {rel_path}")
         return "skipped"
 
-    needs_downsample = bit_depth > 16 or sample_rate > 48000
     rate_display = int(sample_rate) if sample_rate.is_integer() else sample_rate
-    dest_rate = target_sample_rate(sample_rate) if needs_downsample else rate_display
-    data_format = f"alac@{dest_rate}/1"
-    convert_flags = ["-r", "127", "--src-complexity", "bats", "--dither", "2"] if needs_downsample else []
+    target_depth, depth_flag = alac_format_flag(bit_depth)
+    data_format = f"alac@{rate_display}/{depth_flag}"
 
     if dry_run:
         print(
             f"[DRY RUN] Would convert {rel_path} -> {destination.relative_to(root)}: "
-            f"{bit_depth}-bit/{rate_display} Hz -> 16-bit/{dest_rate} Hz"
+            f"{bit_depth}-bit/{rate_display} Hz -> {target_depth}-bit/{rate_display} Hz"
         )
         return "converted"
 
     print(
         f"[CONVERT] {rel_path} -> {destination.relative_to(root)}: "
-        f"{bit_depth}-bit/{rate_display} Hz -> 16-bit/{dest_rate} Hz"
+        f"{bit_depth}-bit/{rate_display} Hz -> {target_depth}-bit/{rate_display} Hz"
     )
 
     with tempfile.TemporaryDirectory(dir=audio_path.parent) as temp_dir:
@@ -271,7 +254,6 @@ def convert_file(
             afconvert,
             "-f", "m4af",
             "-d", data_format,
-            *convert_flags,
             "--soundcheck-generate",
             "--media-kind", "Music",
             str(audio_path),
@@ -283,16 +265,10 @@ def convert_file(
             print(f"[ERROR] Failed converting {rel_path}: {err}", file=sys.stderr)
             return "error"
 
-        itun_hash = compute_afhash_bytes(afhash, temp_out)
-        if itun_hash is None:
-            print(f"[ERROR] Failed computing afhash for {rel_path}", file=sys.stderr)
-            return "error"
-
         encoded_by_parts = [
             "afconvert",
             "-f", "m4af",
             "-d", data_format,
-            *convert_flags,
             "--soundcheck-generate",
             "--media-kind", "Music",
         ]
@@ -300,23 +276,7 @@ def convert_file(
             audio_path,
             temp_out,
             encoded_by=" ".join(encoded_by_parts),
-            itun_hash=itun_hash,
         )
-
-        temp_verify = Path(temp_dir) / f"verify_{destination.name}"
-        verify_cmd = [
-            afconvert,
-            "--check-hash",
-            "-f", "m4af",
-            "-d", "0",
-            str(temp_out),
-            str(temp_verify),
-        ]
-        verify_result = subprocess.run(verify_cmd, capture_output=True, text=True, check=False)
-        if verify_result.returncode != 0:
-            err = verify_result.stderr.strip() or f"afconvert --check-hash exited with {verify_result.returncode}"
-            print(f"[ERROR] Hash verification failed for {rel_path}: {err}", file=sys.stderr)
-            return "error"
 
         os.replace(temp_out, destination)
 
@@ -327,10 +287,9 @@ def convert_file(
 def main() -> int:
     afinfo = shutil.which("afinfo")
     afconvert = shutil.which("afconvert")
-    afhash = shutil.which("afhash")
     missing = [
         name
-        for name, path in (("afinfo", afinfo), ("afconvert", afconvert), ("afhash", afhash))
+        for name, path in (("afinfo", afinfo), ("afconvert", afconvert))
         if not path
     ]
     if missing:
@@ -338,10 +297,7 @@ def main() -> int:
         return 1
 
     parser = argparse.ArgumentParser(
-        description=(
-            "Recursively convert .flac files with bit depth > 16-bit or "
-            "sample rate > 48 kHz to 16-bit ALAC (.m4a, 44.1 kHz or 48 kHz) using afinfo/afconvert."
-        )
+        description="Recursively convert .flac files losslessly to ALAC (.m4a) using afinfo/afconvert."
     )
     parser.add_argument(
         "directory",
@@ -381,7 +337,7 @@ def main() -> int:
     errors = 0
 
     for audio_path in flac_files:
-        status = convert_file(afinfo, afconvert, afhash, audio_path, root, dry_run=args.dry_run)
+        status = convert_file(afinfo, afconvert, audio_path, root, dry_run=args.dry_run)
         if status == "converted":
             converted += 1
         elif status == "skipped":

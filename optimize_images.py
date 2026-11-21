@@ -118,6 +118,24 @@ def process_image(
             text=True,
             check=False,
         )
+        if (res.returncode != 0 or not new_path.exists() or new_path.stat().st_size == 0) and not resize:
+            fd_png, tmp_png_name = tempfile.mkstemp(dir=image_path.parent, prefix=".__sips_png_", suffix=".png")
+            os.close(fd_png)
+            resized_png = Path(tmp_png_name)
+            sips_res = subprocess.run(
+                [sips, "-s", "format", "png", str(image_path), "--out", str(resized_png)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if sips_res.returncode == 0 and resized_png.exists() and resized_png.stat().st_size > 0:
+                res = subprocess.run(
+                    [cjpegli, "-q", str(CJPEGLI_QUALITY), str(resized_png), str(new_path)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
         if res.returncode != 0 or not new_path.exists() or new_path.stat().st_size == 0:
             err = res.stderr.strip() or f"cjpegli exited with {res.returncode}"
             print(f"[ERROR] cjpegli failed on {rel_src}: {err}", file=sys.stderr)

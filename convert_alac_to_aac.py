@@ -282,7 +282,7 @@ def copy_tags(
 
 def convert_alac_to_aac(
     file_path: Path,
-    bitrate: int = 300000,
+    bitrate: int = 256000,
     force: bool = False,
     dry_run: bool = False,
     copy_metadata: bool = True,
@@ -295,7 +295,7 @@ def convert_alac_to_aac(
 
     Parameters:
         file_path: Path to target file.
-        bitrate: Bitrate in bps (e.g. 300000 for 300 kbps).
+        bitrate: Bitrate in bps (e.g. 256000 for 256 kbps).
         force: If True, convert even if codec doesn't explicitly detect as ALAC.
         dry_run: If True, only simulate conversion.
         copy_metadata: If True, copy tags and artwork using mutagen.
@@ -340,7 +340,7 @@ def convert_alac_to_aac(
     # -d aac              : AAC audio format
     # -f m4af             : MPEG-4 Audio (.m4a) container
     # -s 2                : VBR_constrained (targets the specified bitrate using VBR)
-    # -b <bitrate>        : Target bitrate (e.g., 300000 bps = 300 kbps)
+    # -b <bitrate>        : Target bitrate (e.g., 256000 bps = 256 kbps)
     # -q 127              : Highest codec encoding quality (0-127)
     # -r 127              : Highest sample rate converter quality (0-127)
     # --src-complexity bats: Highest sample rate converter complexity (bats = best bandlimited sinc)
@@ -495,7 +495,7 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
 
     parser = argparse.ArgumentParser(
-        description="Convert ALAC M4A audio files to AAC at 300 kbps VBR using Apple afconvert with best quality settings."
+        description="Convert ALAC M4A audio files to AAC at 256 kbps VBR using Apple afconvert with best quality settings."
     )
     parser.add_argument(
         "paths",
@@ -511,8 +511,8 @@ def main():
     parser.add_argument(
         "-b", "--bitrate",
         type=int,
-        default=300000,
-        help="Target bitrate in bits per second (default: 300000 for 300 kbps)",
+        default=256000,
+        help="Target bitrate in bits per second (default: 256000 for 256 kbps)",
     )
     parser.add_argument(
         "--force",
@@ -573,61 +573,28 @@ def main():
     total_files = len(files)
 
     try:
-        global _current_temp_dir
-        for parent_dir, dir_files in files_by_dir.items():
-            ordered_files, gapless_neighbors = build_gapless_plan(dir_files)
-            use_gapless_batch = bool(gapless_neighbors) and not args.dry_run
+        for file_path in files:
+            idx += 1
+            rel_name = file_path.name
+            print(f"[{idx}/{total_files}] Processing: {rel_name} ...", end=" ", flush=True)
 
-            batch_temp_dir: Optional[str] = None
-            staged_replacements: List[Tuple[Path, Path]] = []
+            success, message = convert_alac_to_aac(
+                file_path=file_path,
+                bitrate=args.bitrate,
+                force=args.force,
+                dry_run=args.dry_run,
+                copy_metadata=(not args.no_tags),
+            )
 
-            if use_gapless_batch:
-                batch_temp_dir = tempfile.mkdtemp(prefix=".afconvert_tmp_", dir=parent_dir)
-                _current_temp_dir = batch_temp_dir
-
-            try:
-                for file_path in ordered_files:
-                    idx += 1
-                    rel_name = file_path.name
-                    print(f"[{idx}/{total_files}] Processing: {rel_name} ...", end=" ", flush=True)
-
-                    before, after = gapless_neighbors.get(file_path, (None, None))
-                    staged_out = (Path(batch_temp_dir) / file_path.name) if batch_temp_dir else None
-
-                    success, message = convert_alac_to_aac(
-                        file_path=file_path,
-                        bitrate=args.bitrate,
-                        force=args.force,
-                        dry_run=args.dry_run,
-                        copy_metadata=(not args.no_tags),
-                        gapless_before=before,
-                        gapless_after=after,
-                        staged_out=staged_out,
-                    )
-
-                    if success:
-                        success_count += 1
-                        if staged_out is not None:
-                            staged_replacements.append((staged_out, file_path))
-                        print(f"OK ({message})")
-                    elif "Skipped" in message:
-                        skip_count += 1
-                        print(message)
-                    else:
-                        fail_count += 1
-                        print(f"FAILED ({message})")
-
-                # Replace all succeeded tracks in the directory after all gapless encodes finish
-                for staged_out, target_path in staged_replacements:
-                    os.replace(staged_out, target_path)
-            finally:
-                if batch_temp_dir and os.path.exists(batch_temp_dir):
-                    try:
-                        shutil.rmtree(batch_temp_dir, ignore_errors=True)
-                    except Exception:
-                        pass
-                    if _current_temp_dir == batch_temp_dir:
-                        _current_temp_dir = None
+            if success:
+                success_count += 1
+                print(f"OK ({message})")
+            elif "Skipped" in message:
+                skip_count += 1
+                print(message)
+            else:
+                fail_count += 1
+                print(f"FAILED ({message})")
 
     except KeyboardInterrupt:
         _signal_handler(signal.SIGINT, None)
