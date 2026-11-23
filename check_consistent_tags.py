@@ -55,7 +55,9 @@ def get_track_tags(audio_path: Path) -> tuple[str | None, str | None, bool]:
             album_artist = _first_nonempty_text(tags.get("aART"))
             artist = _first_nonempty_text(tags.get("\xa9ART"))
             cpil = tags.get("cpil")
-            is_compilation = bool(cpil and cpil[0])
+            is_compilation = (
+                bool(cpil[0]) if isinstance(cpil, (list, tuple)) and cpil else bool(cpil)
+            )
             return album, album_artist or artist, is_compilation
 
         if ext == ".mp3":
