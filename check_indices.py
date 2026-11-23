@@ -85,15 +85,26 @@ def main() -> int:
         default=".",
         help="Root directory to recursively scan (default: current directory)",
     )
+    parser.add_argument(
+        "-e", "--exclude",
+        action="extend",
+        nargs="+",
+        default=[],
+        metavar="DIRNAME",
+        help="Directory name(s) to exclude from scanning (basename, not full path)",
+    )
     args = parser.parse_args()
 
+    excluded_dirs = set(args.exclude)
     root_dir = Path(args.directory).resolve()
     if not root_dir.exists():
         print(f"Error: Directory does not exist: {root_dir}", file=sys.stderr)
         return 1
 
     for current_dir, dirs, files in os.walk(root_dir):
-        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        dirs[:] = sorted(
+            d for d in dirs if not d.startswith(".") and d not in excluded_dirs
+        )
         dir_path = Path(current_dir)
 
         audio_files = [

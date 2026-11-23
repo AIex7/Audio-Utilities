@@ -24,4 +24,6 @@ uv run "$SCRIPT_DIR/check_short_audio.py"
 uv run "$SCRIPT_DIR/check_indices.py"
 uv run "$SCRIPT_DIR/check_missing_metadata.py"
 
+uv run "$SCRIPT_DIR/find_duplicate_singles.py"
+
 uv run "$SCRIPT_DIR/random_spek_preview.py"

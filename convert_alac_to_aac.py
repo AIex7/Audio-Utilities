@@ -6,11 +6,11 @@
 # ]
 # ///
 """
-Convert ALAC (Apple Lossless) M4A files to AAC at 256 kbps VBR using Apple's afconvert.
+Convert ALAC (Apple Lossless) M4A files to AAC True VBR using Apple's afconvert.
 
 Key features:
-- Uses Apple afconvert with highest quality settings:
-    -d aac -f m4af -s 2 -b 256000 -q 127 -r 127 --src-complexity bats --soundcheck-generate
+- Uses Apple afconvert with True VBR (vbrq 109) and highest quality settings:
+    -d aac -f m4af -s 3 -ue vbrq 109 -q 127 -r 127 --src-complexity bats --soundcheck-generate
 - Copies all MP4/M4A metadata tags and embedded cover artwork using mutagen.
 - Sets the Encoded By / Encoding Tool tag (©too) to the afconvert command and flags used.
 - Protects stream-specific metadata: iTunNORM (SoundCheck), iTunSMPB (gapless), and ©too.
@@ -257,7 +257,7 @@ def copy_tags(
 
 def convert_alac_to_aac(
     file_path: Path,
-    bitrate: int = 256000,
+    vbrq: int = 109,
     force: bool = False,
     dry_run: bool = False,
     copy_metadata: bool = True,
@@ -266,11 +266,11 @@ def convert_alac_to_aac(
     staged_out: Optional[Path] = None,
 ) -> Tuple[bool, str]:
     """
-    Convert a single M4A file from ALAC to AAC VBR.
+    Convert a single M4A file from ALAC to AAC True VBR.
 
     Parameters:
         file_path: Path to target file.
-        bitrate: Bitrate in bps (e.g. 256000 for 256 kbps).
+        vbrq: True VBR quality setting (0-127, default: 109).
         force: If True, convert even if codec doesn't explicitly detect as ALAC.
         dry_run: If True, only simulate conversion.
         copy_metadata: If True, copy tags and artwork using mutagen.
@@ -296,7 +296,7 @@ def convert_alac_to_aac(
 
     if dry_run:
         gapless_note = " (gapless)" if (gapless_before or gapless_after) else ""
-        return True, f"Dry-run: Would convert to AAC {bitrate // 1000} kbps VBR{gapless_note}"
+        return True, f"Dry-run: Would convert to AAC True VBR (vbrq={vbrq}){gapless_note}"
 
     parent_dir = file_path.parent
     orig_size = file_path.stat().st_size
@@ -314,8 +314,8 @@ def convert_alac_to_aac(
     # afconvert options for maximum quality:
     # -d aac              : AAC audio format
     # -f m4af             : MPEG-4 Audio (.m4a) container
-    # -s 2                : VBR_constrained (targets the specified bitrate using VBR)
-    # -b <bitrate>        : Target bitrate (e.g., 256000 bps = 256 kbps)
+    # -s 3                : True VBR (unconstrained VBR by perceptual quality)
+    # -ue vbrq <vbrq>     : True VBR quality (0-127, default 109)
     # -q 127              : Highest codec encoding quality (0-127)
     # -r 127              : Highest sample rate converter quality (0-127)
     # --src-complexity bats: Highest sample rate converter complexity (bats = best bandlimited sinc)
@@ -324,8 +324,8 @@ def convert_alac_to_aac(
         "afconvert",
         "-d", "aac",
         "-f", "m4af",
-        "-s", "2",
-        "-b", str(bitrate),
+        "-s", "3",
+        "-ue", "vbrq", str(vbrq),
         "-q", "127",
         "-r", "127",
         "--src-complexity", "bats",
@@ -470,7 +470,7 @@ def main():
     signal.signal(signal.SIGTERM, _signal_handler)
 
     parser = argparse.ArgumentParser(
-        description="Convert ALAC M4A audio files to AAC at 256 kbps VBR using Apple afconvert with best quality settings."
+        description="Convert ALAC M4A audio files to AAC True VBR using Apple afconvert with best quality settings."
     )
     parser.add_argument(
         "paths",
@@ -484,10 +484,10 @@ def main():
         help="Search directories recursively for .m4a files",
     )
     parser.add_argument(
-        "-b", "--bitrate",
+        "--vbrq",
         type=int,
-        default=256000,
-        help="Target bitrate in bits per second (default: 256000 for 256 kbps)",
+        default=109,
+        help="True VBR quality setting 0-127 (default: 109)",
     )
     parser.add_argument(
         "--force",
@@ -532,7 +532,7 @@ def main():
         print("No .m4a files found.")
         sys.exit(0)
 
-    print(f"Found {len(files)} .m4a file(s). Target: AAC {args.bitrate // 1000}k VBR (best quality)")
+    print(f"Found {len(files)} .m4a file(s). Target: AAC True VBR (vbrq={args.vbrq}, best quality)")
     print("-" * 65)
 
     success_count = 0
@@ -555,7 +555,7 @@ def main():
 
             success, message = convert_alac_to_aac(
                 file_path=file_path,
-                bitrate=args.bitrate,
+                vbrq=args.vbrq,
                 force=args.force,
                 dry_run=args.dry_run,
                 copy_metadata=(not args.no_tags),
