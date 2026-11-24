@@ -29,6 +29,9 @@ MAX_DURATION_DIFF = 1.0
 MAX_FRAME_SHIFT = 8  # ~1 second of Chromaprint frames (~0.1238 s/frame)
 FINDER_TAGS_XATTR = "com.apple.metadata:_kMDItemUserTags"
 RED_FINDER_TAG = "Red\n6"
+YELLOW_FINDER_TAG = "Yellow\n5"
+ANSI_ORANGE = "\033[38;5;208m"
+ANSI_RESET = "\033[0m"
 
 # 16-bit popcount lookup table for Python 3.9 compatibility
 _POPCOUNT16 = [bin(i).count("1") for i in range(65536)]
@@ -100,8 +103,8 @@ def max_chromaprint_similarity(fp1: tuple[int, ...], fp2: tuple[int, ...]) -> fl
     return best
 
 
-def tag_directory_red(dir_path: Path) -> None:
-    """Set the Finder Red tag on dir_path via xattr, preserving any existing tags."""
+def tag_directory(dir_path: Path, finder_tag: str) -> None:
+    """Set a Finder tag on dir_path via xattr, preserving any existing tags."""
     tags: list[str] = []
     read_res = subprocess.run(
         ["xattr", "-px", FINDER_TAGS_XATTR, str(dir_path)],
@@ -117,15 +120,73 @@ def tag_directory_red(dir_path: Path) -> None:
         except Exception:
             tags = []
 
-    if RED_FINDER_TAG in tags:
+    if finder_tag in tags:
         return
 
-    tags.append(RED_FINDER_TAG)
+    tags.append(finder_tag)
     hex_plist = plistlib.dumps(tags, fmt=plistlib.FMT_BINARY).hex()
     subprocess.run(
         ["xattr", "-wx", FINDER_TAGS_XATTR, hex_plist, str(dir_path)],
         check=True,
     )
+
+
+def _match_tracks(
+    fps_a: list[AudioFingerprint],
+    fps_b: list[AudioFingerprint],
+    get_similarity,
+    one_to_one: bool = False,
+) -> list[tuple[str, str, float]] | None:
+    """
+    Return matched (name_a, name_b, similarity) tuples if every track in fps_a
+    matches a track in fps_b; when one_to_one=True, require distinct targets in fps_b.
+    """
+    candidates: list[list[tuple[int, float]]] = []
+    for fp_a in fps_a:
+        matches_for_a: list[tuple[int, float]] = []
+        for idx_b, fp_b in enumerate(fps_b):
+            if abs(fp_a.duration - fp_b.duration) > MAX_DURATION_DIFF:
+                continue
+            sim = get_similarity(fp_a, fp_b)
+            if sim >= SIMILARITY_THRESHOLD:
+                matches_for_a.append((idx_b, sim))
+        if not matches_for_a:
+            return None
+        matches_for_a.sort(key=lambda item: item[1], reverse=True)
+        candidates.append(matches_for_a)
+
+    if not one_to_one:
+        return [
+            (fps_a[i].path.name, fps_b[cands[0][0]].path.name, cands[0][1])
+            for i, cands in enumerate(candidates)
+        ]
+
+    # Bipartite matching to ensure every track in fps_a maps to a distinct track in fps_b
+    match_b_to_a: list[int] = [-1] * len(fps_b)
+    sim_for_a: list[float] = [0.0] * len(fps_a)
+
+    def try_assign(idx_a: int, visited_b: list[bool]) -> bool:
+        for idx_b, sim in candidates[idx_a]:
+            if visited_b[idx_b]:
+                continue
+            visited_b[idx_b] = True
+            prev_a = match_b_to_a[idx_b]
+            if prev_a == -1 or try_assign(prev_a, visited_b):
+                match_b_to_a[idx_b] = idx_a
+                sim_for_a[idx_a] = sim
+                return True
+        return False
+
+    for idx_a in range(len(fps_a)):
+        if not try_assign(idx_a, [False] * len(fps_b)):
+            return None
+
+    assigned_b = {idx_b: idx_a for idx_b, idx_a in enumerate(match_b_to_a) if idx_a != -1}
+    a_to_b = {idx_a: idx_b for idx_b, idx_a in assigned_b.items()}
+    return [
+        (fps_a[i].path.name, fps_b[a_to_b[i]].path.name, sim_for_a[i])
+        for i in range(len(fps_a))
+    ]
 
 
 def main() -> int:
@@ -196,40 +257,47 @@ def main() -> int:
         return sim_cache[key]
 
     matched_dirs = 0
+    equal_pairs = 0
 
     for idx_a, (dir_a, tracks_a) in enumerate(dirs_by_count):
-        fps_a = [fp_map.get(p) for p in tracks_a]
-        if any(fp is None for fp in fps_a):
+        raw_fps_a = [fp_map.get(p) for p in tracks_a]
+        if any(fp is None for fp in raw_fps_a):
             continue
+        fps_a = [fp for fp in raw_fps_a if fp is not None]
 
         count_a = len(tracks_a)
+        rel_a = "." if dir_a == root else str(dir_a.relative_to(root))
+
         for dir_b, tracks_b in dirs_by_count[idx_a + 1:]:
-            if len(tracks_b) <= count_a:
+            fps_b = [fp_map[p] for p in tracks_b if p in fp_map]
+
+            if len(tracks_b) == count_a:
+                if len(fps_b) != count_a:
+                    continue
+                matched_pairs = _match_tracks(fps_a, fps_b, get_similarity, one_to_one=True)
+                if matched_pairs is not None:
+                    rel_b = "." if dir_b == root else str(dir_b.relative_to(root))
+                    min_pct = min(m[2] for m in matched_pairs) * 100.0
+                    if args.dry_run:
+                        print(
+                            f"{ANSI_ORANGE}[DRY RUN] Would tag Yellow: {rel_a} ({count_a} track(s)) "
+                            f"== {rel_b} ({len(tracks_b)} track(s), min {min_pct:.2f}%){ANSI_RESET}"
+                        )
+                    else:
+                        tag_directory(dir_a, YELLOW_FINDER_TAG)
+                        tag_directory(dir_b, YELLOW_FINDER_TAG)
+                        print(
+                            f"{ANSI_ORANGE}[TAGGED YELLOW] {rel_a} ({count_a} track(s)) "
+                            f"== {rel_b} ({len(tracks_b)} track(s), min {min_pct:.2f}%){ANSI_RESET}"
+                        )
+                    equal_pairs += 1
                 continue
 
-            fps_b = [fp_map[p] for p in tracks_b if p in fp_map]
             if len(fps_b) < count_a:
                 continue
 
-            matched_pairs: list[tuple[str, str, float]] = []
-            all_matched = True
-            for fp_a in fps_a:
-                assert fp_a is not None
-                best_match: tuple[str, float] | None = None
-                for fp_b in fps_b:
-                    if abs(fp_a.duration - fp_b.duration) > MAX_DURATION_DIFF:
-                        continue
-                    sim = get_similarity(fp_a, fp_b)
-                    if sim >= SIMILARITY_THRESHOLD:
-                        if best_match is None or sim > best_match[1]:
-                            best_match = (fp_b.path.name, sim)
-                if best_match is None:
-                    all_matched = False
-                    break
-                matched_pairs.append((fp_a.path.name, best_match[0], best_match[1]))
-
-            if all_matched:
-                rel_a = "." if dir_a == root else str(dir_a.relative_to(root))
+            matched_pairs = _match_tracks(fps_a, fps_b, get_similarity, one_to_one=False)
+            if matched_pairs is not None:
                 rel_b = "." if dir_b == root else str(dir_b.relative_to(root))
                 min_pct = min(m[2] for m in matched_pairs) * 100.0
                 if args.dry_run:
@@ -238,7 +306,7 @@ def main() -> int:
                         f"<= {rel_b} ({len(tracks_b)} track(s), min {min_pct:.2f}%)"
                     )
                 else:
-                    tag_directory_red(dir_a)
+                    tag_directory(dir_a, RED_FINDER_TAG)
                     print(
                         f"[TAGGED RED] {rel_a} ({count_a} track(s)) "
                         f"<= {rel_b} ({len(tracks_b)} track(s), min {min_pct:.2f}%)"
@@ -249,7 +317,7 @@ def main() -> int:
     print("=" * 60)
     print(
         f"Done. Directories checked: {len(dir_tracks)} | Audio files: {len(all_paths)} | "
-        f"Matched & tagged Red: {matched_dirs}"
+        f"Matched & tagged Red: {matched_dirs} | Exact same-count pairs (Yellow): {equal_pairs}"
     )
     return 0
 
