@@ -47,6 +47,15 @@ TEXT_TAG_MAP: tuple[tuple[tuple[str, ...], str], ...] = (
     (("movementname",), "\xa9mvn"),
     (("lyrics", "unsyncedlyrics"), "\xa9lyr"),
 )
+JOINED_ARTIST_MP4_KEYS = {"\xa9ART", "aART"}
+
+
+def _format_apple_music_artists(values: list[str]) -> str:
+    """Join multiple artist values using Apple Music convention ('A & B', 'A, B & C')."""
+    unique = list(dict.fromkeys(values))
+    if len(unique) == 1:
+        return unique[0]
+    return f"{', '.join(unique[:-1])} & {unique[-1]}"
 
 
 def _parse_int_part(raw: object, part_index: int = 0) -> int:
@@ -103,7 +112,10 @@ def copy_flac_tags_to_m4a(
             values = flac.get(key)
             cleaned = [str(v).strip() for v in values if str(v).strip()] if values else []
             if cleaned:
-                m4a.tags[mp4_key] = cleaned
+                if mp4_key in JOINED_ARTIST_MP4_KEYS:
+                    m4a.tags[mp4_key] = [_format_apple_music_artists(cleaned)]
+                else:
+                    m4a.tags[mp4_key] = cleaned
                 break
 
     track_num, total_tracks = _read_flac_pair(flac, "tracknumber", ("tracktotal", "totaltracks"))
