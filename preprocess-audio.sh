@@ -13,7 +13,7 @@ python3 "$SCRIPT_DIR/optimize_images.py"
 
 
 uv run "$SCRIPT_DIR/convert_flac_to_alac.py"
-uv run "$SCRIPT_DIR/convert_alac_to_aac.py" -r --vbrq 100
+uv run "$SCRIPT_DIR/convert_alac_to_aac.py" -r --vbrq 109
 
 uv run "$SCRIPT_DIR/embed_and_trash_cover.py"
 
